@@ -1215,6 +1215,9 @@ cefnetd_handle_create (
 		}
 	}
 
+	/* 初期化完了メッセージを出力 */
+	cef_log_write (CefC_Log_Info, "CEFORE daemon initialization completed successfully\n");
+	cef_log_write (CefC_Log_Info, "Ready to start main event loop\n");
 
 	return (hdl);
 }
@@ -1337,6 +1340,20 @@ cefnetd_event_dispatch (
 
 	uint64_t nowt = cef_client_present_timeus_calc ();
 
+	/* 起動成功メッセージを出力 */
+	cef_log_write (CefC_Log_Info, "=============================================================\n");
+	cef_log_write (CefC_Log_Info, "           CEFORE DAEMON STARTED SUCCESSFULLY               \n");
+	cef_log_write (CefC_Log_Info, "=============================================================\n");
+	cef_log_write (CefC_Log_Info, "Port: %d\n", hdl->port_num);
+	cef_log_write (CefC_Log_Info, "PIT Size: %d\n", hdl->pit_max_size);
+	cef_log_write (CefC_Log_Info, "FIB Size: %d\n", hdl->fib_max_size);
+	cef_log_write (CefC_Log_Info, "Node Type: %s\n", 
+		(hdl->node_type == CefC_Node_Type_Router) ? "Router" : "Receiver");
+	if (hdl->My_Node_Name) {
+		cef_log_write (CefC_Log_Info, "Node Name: %s\n", hdl->My_Node_Name);
+	}
+	cef_log_write (CefC_Log_Info, "Forwarding Strategy: %s\n", hdl->forwarding_strategy);
+	cef_log_write (CefC_Log_Info, "=============================================================\n");
 	cef_log_write (CefC_Log_Info, "Running\n");
 	cefnetd_running_f = 1;
 
