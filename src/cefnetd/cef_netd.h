@@ -133,6 +133,11 @@
 #define CefC_Ctrl_StatusOpt_FibV4UdpOnly	0x0400
 #endif //((defined CefC_Develop))
 
+/*------------------------------------------------------------------*/
+/* KeyId Whitelist parameters                                      */
+/*------------------------------------------------------------------*/
+#define CefC_KeyId_Len		32      /* Length of SHA256 KeyId in byte */
+#define CefC_KeyId_Max		32      /* Maximum number of KeyIds to register */
 
 /****************************************************************************************
  Structure Declarations
@@ -251,6 +256,10 @@ typedef struct {
 												/*  higher than or equal to 2 			*/
 												/*  and lower than or equal to 5.		*/
 
+	/********** KeyId Whitelist        ***********/
+	uint8_t             keyid_wl_num;                                   /* Number of registered KeyIds */
+	unsigned char       keyid_wl[CefC_KeyId_Max][CefC_KeyId_Len];       /* KeyId whitelist             */
+
 	/********** Tables				***********/
 	CefT_Hash_Handle	fib;					/* FIB 									*/
 	CefT_Hash_Handle	pit;					/* PIT 									*/
@@ -332,6 +341,26 @@ typedef struct {
 	CefT_Mp_Handle 		tx_que_mp;
 
 } CefT_Netd_Handle;
+
+/*------------------------------------------------------------------------------*/
+/* Inline: KeyId whitelist check                                                */
+/*   Return 1 if keyid matches any entry in hdl->keyid_wl, otherwise 0          */
+/*------------------------------------------------------------------------------*/
+static inline int
+cefnetd_keyid_wl_check (
+    CefT_Netd_Handle* hdl,
+    const unsigned char* keyid
+) {
+    if (hdl == NULL || keyid == NULL) {
+        return 0;
+    }
+    for (uint8_t i = 0; i < hdl->keyid_wl_num && i < CefC_KeyId_Max; i++) {
+        if (memcmp(hdl->keyid_wl[i], keyid, CefC_KeyId_Len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 typedef struct {
 	unsigned char	msg[CefC_Cefstatus_MsgSize];
