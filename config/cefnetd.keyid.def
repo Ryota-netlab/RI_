@@ -1,0 +1,14 @@
+# cefnetd.keyid - URI to KeyId mapping configuration
+#
+# Format: URI KeyID
+# URI: CCN-X URI (e.g., ccnx:/example/content)
+# KeyID: 64-character hexadecimal string (32 bytes) with 0x prefix
+#
+# Example configurations:
+# ccnx:/news/today 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+# ccnx:/news/sports 0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+# ccnx:/news 0x1111111111111111111111111111111111111111111111111111111111111111
+# ccnx:/ 0x0101010101010101010101010101010101010101010101010101010101010101
+#
+# The matching is performed using longest prefix match, same as FIB.
+# Lines starting with # are comments and will be ignored. 

@@ -169,6 +169,24 @@ cefnetd_config_fib_read (
 );
 
 /*--------------------------------------------------------------------------------------
+	Reads cefnetd.keyid configuration file 
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_config_keyid_read (
+	CefT_Netd_Handle* hdl					/* cefnetd handle							*/
+);
+
+/*--------------------------------------------------------------------------------------
+	Searches keyid for given URI name
+----------------------------------------------------------------------------------------*/
+static unsigned char*						/* Returns keyid pointer or NULL			*/
+cefnetd_uri_keyid_lookup (
+	CefT_Netd_Handle* hdl,					/* cefnetd handle							*/
+	const unsigned char* name,				/* URI name (TLV format)					*/
+	uint16_t name_len						/* Length of URI name						*/
+);
+
+/*--------------------------------------------------------------------------------------
 	Handles the control message
 ----------------------------------------------------------------------------------------*/
 static int
@@ -908,6 +926,10 @@ cefnetd_handle_create (
 	cefnetd_config_fib_read (hdl);
 	cef_fib_faceid_cleanup (hdl->fib);
 
+	/* Creates and initialize URI-KeyId table */
+	hdl->uri_keyid_table = cef_hash_tbl_create (128);
+	cefnetd_config_keyid_read (hdl);
+
 	/* ★テスト用のKeyIdホワイトリスト設定★ */
 	hdl->keyid_wl_num = 1;
 	/* 例：ダミーのKeyId（32バイトの0x01）をホワイトリストに追加 */
@@ -1320,6 +1342,20 @@ cefnetd_handle_destroy (
 #if CefC_IsEnable_ContentStore
 	cef_csmgr_stat_destroy (&hdl->cs_stat);
 #endif // CefC_IsEnable_ContentStore
+
+	/* Cleanup URI-KeyId table */
+	if (hdl->uri_keyid_table) {
+		CefT_UriKeyid_Entry* entry;
+		uint32_t index = 0;
+		do {
+			entry = (CefT_UriKeyid_Entry*) cef_hash_tbl_item_check_from_index(hdl->uri_keyid_table, &index);
+			if (entry) {
+				free(entry);
+			}
+			index++;
+		} while (entry != NULL);
+		cef_hash_tbl_destroy(hdl->uri_keyid_table);
+	}
 
 	free (hdl);
 
@@ -3280,6 +3316,20 @@ cefnetd_incoming_interest_process (
 				/* ホワイトリストに一致したので、validation失敗を無視して処理を続行 */
 				cef_log_write(CefC_Log_Info, "Validation failed but KeyId is whitelisted. Processing continues.\n");
 				goto validation_bypass;
+			}
+		}
+		
+		/* URIごとのKeyIdマッピングをチェック */
+		if (parse_res >= 0 && pm_temp.alg.keyid_len > 0) {
+			unsigned char* expected_keyid = cefnetd_uri_keyid_lookup(hdl, pm_temp.name, pm_temp.name_len);
+			if (expected_keyid != NULL) {
+				if (memcmp(pm_temp.alg.keyid, expected_keyid, CefC_KeyId_Len) == 0) {
+					/* URI対応keyidが一致したので、validation失敗を無視して処理を続行 */
+					cef_log_write(CefC_Log_Info, "Validation failed but KeyId matches URI mapping. Processing continues.\n");
+					goto validation_bypass;
+				} else {
+					cef_log_write(CefC_Log_Info, "KeyId mismatch for URI. Expected keyid does not match.\n");
+				}
 			}
 		}
 		
@@ -7050,9 +7100,9 @@ cefnetd_node_id_get (
 }
 
 /*--------------------------------------------------------------------------------------
-	Obtains my NodeID (IP Address)
+	Gets matched node id
 ----------------------------------------------------------------------------------------*/
-static int
+static int									/* Returns node id length 					*/
 cefnetd_matched_node_id_get (
 	CefT_Netd_Handle* hdl,
 	unsigned char* peer_node_id,
@@ -7100,72 +7150,7 @@ cefnetd_matched_node_id_get (
 	return (4);
 }
 
-#if CefC_IsEnable_ContentStore
-/*--------------------------------------------------------------------------------------
-	cefnetd cached Object process
-----------------------------------------------------------------------------------------*/
-static int									/* Returns a negative value if it fails 	*/
-cefnetd_cefcache_object_process (
-	CefT_Netd_Handle* hdl,					/* cefnetd handle							*/
-	unsigned char* msg 						/* received message to handle				*/
-){
-	struct fixed_hdr* chp;
-	uint16_t pkt_len = 0;
-	uint16_t hdr_len = 0;
-	uint16_t payload_len = 0;
-	uint16_t header_len = 0;
-	CefT_CcnMsg_MsgBdy pm = { 0 };
-	CefT_CcnMsg_OptHdr poh = { 0 };
-	CefT_Pit_Entry* pe = NULL;
-	int i, res;
-	uint8_t faceid_bitmap[CefC_Face_Router_Max];
-	uint16_t faceids[CefC_Fib_UpFace_Max];
-	uint16_t face_num = 0;
-	CefT_Down_Faces* face = NULL;
-	CefT_Rx_Elem elem;
-	int tp_plugin_res = CefC_Pi_All_Permission;
-	CefT_Hash_Handle pit_handle = hdl->pit;
 
-	cefnetd_faceidmap_init(faceid_bitmap, sizeof(faceid_bitmap));
-
-	chp = (struct fixed_hdr*) msg;
-	pkt_len = ntohs (chp->pkt_len);
-	hdr_len = chp->hdr_len;
-	payload_len = pkt_len - hdr_len;
-	header_len 	= hdr_len;
-
-#ifdef	__SYMBOLIC__
-	fprintf( stderr, "[%s] IN Msg (%d bytes) \n", __func__, payload_len + header_len );
-#endif
-
-#ifdef CefC_Debug
-	cef_dbg_write (CefC_Dbg_Finer,
-		"Process the Content Object (%d bytes) from cefnetd cache\n", payload_len + header_len);
-	cef_dbg_buff_write (CefC_Dbg_Finest, msg, payload_len + header_len);
-#endif // CefC_Debug
-	/*--------------------------------------------------------------------
-		Parses the Object message
-	----------------------------------------------------------------------*/
-	if (payload_len + header_len > CefC_Max_Msg_Size) {
-#ifdef CefC_Debug
-		cef_dbg_write (CefC_Dbg_Finer, "Content Object is too large\n");
-#endif // CefC_Debug
-		return (-1);
-	}
-	res = cef_frame_message_parse (
-					msg, payload_len, header_len, &poh, &pm, CefC_PT_OBJECT);
-	if (res < 0) {
-#ifdef CefC_Debug
-		cef_dbg_write (CefC_Dbg_Finer,
-			"Detects the invalid Content Object from localcache.\n");
-#endif // CefC_Debug
-		return (-1);
-	}
-
-	/* TODO: 残りのコンテンツオブジェクト処理の実装 */
-	return (0);
-}
-#endif // CefC_IsEnable_ContentStore
 
 /* NodeName Check */
 static int									/* 0:OK -1:Error */
@@ -9082,4 +9067,171 @@ cefnetd_config_fib_read (
 	fclose (fp);
 
 	return (1);
+}
+
+/*--------------------------------------------------------------------------------------
+	Convert hex string to byte array
+----------------------------------------------------------------------------------------*/
+static int									/* Returns 0 on success, -1 on failure		*/
+cefnetd_hex_to_bytes (
+	const char* hex_str,					/* Hex string to convert					*/
+	unsigned char* bytes,					/* Output byte array						*/
+	int byte_len							/* Expected byte length						*/
+) {
+	int i;
+	int hex_len = strlen(hex_str);
+	const char* start_ptr = hex_str;
+	
+	/* Skip 0x prefix if present */
+	if (hex_len >= 2 && hex_str[0] == '0' && (hex_str[1] == 'x' || hex_str[1] == 'X')) {
+		start_ptr = hex_str + 2;
+		hex_len -= 2;
+	}
+	
+	if (hex_len != byte_len * 2) {
+		return (-1);
+	}
+	
+	for (i = 0; i < byte_len; i++) {
+		char hex_byte[3];
+		hex_byte[0] = start_ptr[i * 2];
+		hex_byte[1] = start_ptr[i * 2 + 1];
+		hex_byte[2] = '\0';
+		
+		char* endptr;
+		long val = strtol(hex_byte, &endptr, 16);
+		if (*endptr != '\0' || val < 0 || val > 255) {
+			return (-1);
+		}
+		bytes[i] = (unsigned char)val;
+	}
+	
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Reads cefnetd.keyid configuration file 
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_config_keyid_read (
+	CefT_Netd_Handle* hdl					/* cefnetd handle							*/
+) {
+	char	ws[PATH_MAX];
+	FILE*	fp = NULL;
+	char	buff[BUFSIZ+1];
+	int		line_num = 0;
+
+	cef_client_config_dir_get (ws);
+	strcat (ws, "/cefnetd.keyid");
+
+	fp = fopen (ws, "r");
+	if (fp == NULL) {
+		/* keyidファイルが存在しない場合はスキップ */
+		cef_log_write (CefC_Log_Info, "No keyid file found (%s)\n", ws);
+		return (0);
+	}
+
+	while (fgets (buff, sizeof(buff), fp) != NULL) {
+		char	uri[CefC_NAME_BUFSIZ];
+		char	keyid_str[CefC_NAME_BUFSIZ];
+		unsigned char keyid[CefC_KeyId_Len];
+		unsigned char name_tlv[CefC_Max_Length];
+		int name_len;
+		CefT_UriKeyid_Entry* entry;
+		
+		line_num++;
+		buff[sizeof(buff)-1] = 0;
+
+		if ((buff[0] == '#') || isspace(buff[0])) {
+			continue;
+		}
+
+		/* parse the read line: URI KeyID		*/
+		if (sscanf(buff, "%s %s", uri, keyid_str) != 2) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] Invalid line:%d %s\n", line_num, buff);
+			continue;
+		}
+
+		/* Convert keyid string to bytes */
+		int keyid_str_len = strlen(keyid_str);
+		if (keyid_str_len != CefC_KeyId_Len * 2 && keyid_str_len != CefC_KeyId_Len * 2 + 2) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] Invalid keyid length at line %d (expected %d or %d chars, got %d)\n", 
+				line_num, CefC_KeyId_Len * 2, CefC_KeyId_Len * 2 + 2, keyid_str_len);
+			continue;
+		}
+
+		if (cefnetd_hex_to_bytes(keyid_str, keyid, CefC_KeyId_Len) != 0) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] Invalid keyid format at line %d\n", line_num);
+			continue;
+		}
+
+		/* Convert URI to Name TLV */
+		name_len = cef_frame_conversion_uri_to_name (uri, name_tlv);
+		if (name_len < 0) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] Invalid URI at line %d: %s\n", line_num, uri);
+			continue;
+		}
+		if (name_len > CefC_NAME_MAXLEN) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] URI too long at line %d: %s\n", line_num, uri);
+			continue;
+		}
+
+		/* Create new entry */
+		entry = (CefT_UriKeyid_Entry*) malloc(sizeof(CefT_UriKeyid_Entry));
+		if (entry == NULL) {
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Memory allocation failed at line %d\n", line_num);
+			fclose(fp);
+			return (-1);
+		}
+
+		/* Set entry data */
+		memcpy(entry->name, name_tlv, name_len);
+		entry->name_len = name_len;
+		memcpy(entry->keyid, keyid, CefC_KeyId_Len);
+
+		/* Add to hash table */
+		if (cef_hash_tbl_item_set(hdl->uri_keyid_table, name_tlv, name_len, entry) < 0) {
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Failed to add entry at line %d\n", line_num);
+			free(entry);
+			fclose(fp);
+			return (-1);
+		}
+
+		cef_log_write (CefC_Log_Info, "[cefnetd.keyid] Added URI-KeyId mapping: %s\n", uri);
+	}
+
+	fclose(fp);
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Searches keyid for given URI name (using longest prefix match)
+----------------------------------------------------------------------------------------*/
+static unsigned char*						/* Returns keyid pointer or NULL			*/
+cefnetd_uri_keyid_lookup (
+	CefT_Netd_Handle* hdl,					/* cefnetd handle							*/
+	const unsigned char* name,				/* URI name (TLV format)					*/
+	uint16_t name_len						/* Length of URI name						*/
+) {
+	CefT_UriKeyid_Entry* entry;
+	CefT_UriKeyid_Entry* best_entry = NULL;
+	int best_match_len = 0;
+	int i;
+	
+	/* Search for longest prefix match */
+	for (i = name_len; i > 0; i--) {
+		entry = (CefT_UriKeyid_Entry*) cef_hash_tbl_item_get(hdl->uri_keyid_table, name, i);
+		if (entry != NULL) {
+			/* Check if this entry's name is actually a prefix of the input name */
+			if (entry->name_len <= name_len && 
+				memcmp(entry->name, name, entry->name_len) == 0) {
+				if (entry->name_len > best_match_len) {
+					best_entry = entry;
+					best_match_len = entry->name_len;
+				}
+			}
+		}
+	}
+	
+	return (best_entry != NULL) ? best_entry->keyid : NULL;
 }

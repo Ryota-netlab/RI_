@@ -139,6 +139,16 @@
 #define CefC_KeyId_Len		32      /* Length of SHA256 KeyId in byte */
 #define CefC_KeyId_Max		32      /* Maximum number of KeyIds to register */
 
+/*------------------------------------------------------------------*/
+/* URI-KeyId Mapping parameters                                    */
+/*------------------------------------------------------------------*/
+typedef struct _CefT_UriKeyid_Entry {
+	unsigned char		name[CefC_NAME_MAXLEN];		/* URI name (TLV format) */
+	uint16_t			name_len;					/* Length of URI name */
+	unsigned char		keyid[CefC_KeyId_Len];		/* Associated KeyId */
+} CefT_UriKeyid_Entry;
+
+/*------------------------------------------------------------------*/
 /****************************************************************************************
  Structure Declarations
  ****************************************************************************************/
@@ -259,6 +269,9 @@ typedef struct {
 	/********** KeyId Whitelist        ***********/
 	uint8_t             keyid_wl_num;                                   /* Number of registered KeyIds */
 	unsigned char       keyid_wl[CefC_KeyId_Max][CefC_KeyId_Len];       /* KeyId whitelist             */
+
+	/********** URI-KeyId Mapping Table ***********/
+	CefT_Hash_Handle    uri_keyid_table;                                /* URI to KeyId mapping table */
 
 	/********** Tables				***********/
 	CefT_Hash_Handle	fib;					/* FIB 									*/
@@ -401,6 +414,7 @@ void
 cefnetd_handle_destroy (
 	CefT_Netd_Handle* hdl						/* cefnetd handle to destroy			*/
 );
+
 /*--------------------------------------------------------------------------------------
 	Main Loop Function
 ----------------------------------------------------------------------------------------*/
