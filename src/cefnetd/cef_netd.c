@@ -177,6 +177,55 @@ cefnetd_config_keyid_read (
 );
 
 /*--------------------------------------------------------------------------------------
+	Reads key pair configuration file
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_config_keypair_read (
+	CefT_Netd_Handle* hdl					/* cefnetd handle							*/
+);
+
+/*--------------------------------------------------------------------------------------
+	Loads PEM format key file
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_load_pem_key (
+	const char* key_file, 					/* Key file path							*/
+	unsigned char** key_data, 				/* Output key data							*/
+	int* key_len							/* Output key length						*/
+);
+
+/*--------------------------------------------------------------------------------------
+	Generates KeyID from public key using SHA-256
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_generate_keyid_from_pubkey (
+	unsigned char* pubkey_data, 			/* Public key data							*/
+	int pubkey_len,							/* Public key length						*/
+	unsigned char* keyid_out				/* Output KeyID								*/
+);
+
+/*--------------------------------------------------------------------------------------
+	Selects key pair for URI using longest prefix match
+----------------------------------------------------------------------------------------*/
+static CefT_KeyPair_Entry*					/* Returns key pair entry or NULL			*/
+cefnetd_select_keypair_for_uri (
+	CefT_Netd_Handle* hdl, 					/* cefnetd handle							*/
+	unsigned char* uri, 					/* URI name (TLV format)					*/
+	int uri_len								/* URI length								*/
+);
+
+/*--------------------------------------------------------------------------------------
+	Sets KeyID for Interest based on URI
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_set_keyid_for_interest (
+	CefT_Netd_Handle* hdl,					/* cefnetd handle							*/
+	CefT_CcnMsg_MsgBdy* tlvs,				/* Message body structure					*/
+	unsigned char* uri,						/* URI name (TLV format)					*/
+	int uri_len								/* URI length								*/
+);
+
+/*--------------------------------------------------------------------------------------
 	Searches keyid for given URI name
 ----------------------------------------------------------------------------------------*/
 static unsigned char*						/* Returns keyid pointer or NULL			*/
@@ -890,6 +939,14 @@ cefnetd_handle_create (
 	}
 	cef_log_write (CefC_Log_Info, "Loading cefnetd.conf ... OK\n");
 
+	/* Reads the key pair config file 		*/
+	res = cefnetd_config_keypair_read (hdl);
+	if (res < 0) {
+		cef_log_write (CefC_Log_Error, "Failed to read the key pair configuration\n");
+		return (NULL);
+	}
+	cef_log_write (CefC_Log_Info, "Loading key pair configuration ... OK\n");
+
 	/* Initialize sha256 validation environment for ccninfo */
 	if (hdl->ccninfo_valid_type == CefC_T_RSA_SHA256) {
 		res = cef_valid_init_ccninfoRT (conf_path);
@@ -1370,6 +1427,27 @@ cefnetd_handle_destroy (
 			index++;
 		} while (entry != NULL);
 		cef_hash_tbl_destroy(hdl->uri_keyid_table);
+	}
+
+	/* Cleanup Key Pair table */
+	if (hdl->keypair_table_head) {
+		CefT_KeyPair_Entry* entry = hdl->keypair_table_head;
+		CefT_KeyPair_Entry* next_entry;
+		
+		while (entry != NULL) {
+			next_entry = entry->next;
+			
+			/* Free allocated memory */
+			if (entry->uri) free(entry->uri);
+			if (entry->private_key_file) free(entry->private_key_file);
+			if (entry->public_key_file) free(entry->public_key_file);
+			if (entry->private_key_data) free(entry->private_key_data);
+			if (entry->public_key_data) free(entry->public_key_data);
+			free(entry);
+			
+			entry = next_entry;
+		}
+		hdl->keypair_table_head = NULL;
 	}
 
 	free (hdl);
@@ -4592,7 +4670,7 @@ cefnetd_incoming_ccninforeq_process (
 			&& hdl->cs_stat->cache_type != CefC_Cache_Type_ExConpub
 		   ) {
 			/* Checks whether the specified contents is cached 	*/
-			if (hdl->cs_stat->cache_type != CefC_Default_Cache_Type) {
+			if (hdl->cs_stat->cache_type != CefC_Cache_Type_Localcache) {
 				/* Query by Name without chunk number to check if content exists */
 				if (pm.chunk_num_f) {
 					name_len = pm.name_len - (CefC_S_Type + CefC_S_Length + CefC_S_ChunkNum);
@@ -6976,7 +7054,7 @@ cef_dbg_write (CefC_Dbg_Finest, "now_t="FMTU64" , pe->drp_lifetime_us= "FMTU64"\
 ----------------------------------------------------------------------------------------*/
 static void
 cefnetd_node_id_get (
-	CefT_Netd_Handle* hdl						/* cefnetd handle						*/
+	CefT_Netd_Handle* hdl						/* cefnetd handle							*/
 ) {
 	struct ifaddrs *ifa_list;
 	struct ifaddrs *ifa;
@@ -9249,4 +9327,273 @@ cefnetd_uri_keyid_lookup (
 	}
 	
 	return (best_entry != NULL) ? best_entry->keyid : NULL;
+}
+
+/*--------------------------------------------------------------------------------------
+	Reads key pair configuration file
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_config_keypair_read (
+	CefT_Netd_Handle* hdl					/* cefnetd handle							*/
+) {
+	char	ws[PATH_MAX];
+	FILE*	fp = NULL;
+	char	buff[BUFSIZ+1];
+	int		line_num = 0;
+
+	cef_client_config_dir_get (ws);
+	strcat (ws, "/cefnetd.keyid");
+
+	fp = fopen (ws, "r");
+	if (fp == NULL) {
+		/* keyidファイルが存在しない場合はスキップ */
+		cef_log_write (CefC_Log_Info, "No keypair config file found (%s). Using default behavior.\n", ws);
+		return (0);
+	}
+
+	while (fgets (buff, sizeof(buff), fp) != NULL) {
+		char	uri[CefC_NAME_BUFSIZ];
+		char	private_key_file[PATH_MAX];
+		char	public_key_file[PATH_MAX];
+		CefT_KeyPair_Entry* entry;
+		unsigned char name_tlv[CefC_Max_Length];
+		int name_len;
+		
+		line_num++;
+		buff[sizeof(buff)-1] = 0;
+
+		if ((buff[0] == '#') || isspace(buff[0])) {
+			continue;
+		}
+
+		/* parse the read line: URI PrivateKeyFile PublicKeyFile */
+		if (sscanf(buff, "%s %s %s", uri, private_key_file, public_key_file) != 3) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] Invalid line:%d %s\n", line_num, buff);
+			continue;
+		}
+
+		/* Convert URI to Name TLV */
+		name_len = cef_frame_conversion_uri_to_name (uri, name_tlv);
+		if (name_len < 0) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] Invalid URI at line %d: %s\n", line_num, uri);
+			continue;
+		}
+		if (name_len > CefC_NAME_MAXLEN) {
+			cef_log_write (CefC_Log_Warn, "[cefnetd.keyid] URI too long at line %d: %s\n", line_num, uri);
+			continue;
+		}
+
+		/* Create new entry */
+		entry = (CefT_KeyPair_Entry*) malloc(sizeof(CefT_KeyPair_Entry));
+		if (entry == NULL) {
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Memory allocation failed at line %d\n", line_num);
+			fclose(fp);
+			return (-1);
+		}
+		memset(entry, 0, sizeof(CefT_KeyPair_Entry));
+
+		/* Set entry data */
+		entry->uri = (unsigned char*) malloc(name_len);
+		if (entry->uri == NULL) {
+			free(entry);
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] URI memory allocation failed at line %d\n", line_num);
+			fclose(fp);
+			return (-1);
+		}
+		memcpy(entry->uri, name_tlv, name_len);
+		entry->uri_len = name_len;
+
+		entry->private_key_file = strdup(private_key_file);
+		entry->public_key_file = strdup(public_key_file);
+		
+		if (entry->private_key_file == NULL || entry->public_key_file == NULL) {
+			if (entry->private_key_file) free(entry->private_key_file);
+			if (entry->public_key_file) free(entry->public_key_file);
+			free(entry->uri);
+			free(entry);
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] File path memory allocation failed at line %d\n", line_num);
+			fclose(fp);
+			return (-1);
+		}
+
+		/* Load key files */
+		if (cefnetd_load_pem_key(entry->public_key_file, &entry->public_key_data, &entry->public_key_len) != 0) {
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Failed to load public key at line %d: %s\n", line_num, entry->public_key_file);
+			free(entry->private_key_file);
+			free(entry->public_key_file);
+			free(entry->uri);
+			free(entry);
+			continue;
+		}
+
+		if (cefnetd_load_pem_key(entry->private_key_file, &entry->private_key_data, &entry->private_key_len) != 0) {
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Failed to load private key at line %d: %s\n", line_num, entry->private_key_file);
+			free(entry->public_key_data);
+			free(entry->private_key_file);
+			free(entry->public_key_file);
+			free(entry->uri);
+			free(entry);
+			continue;
+		}
+
+		/* Generate KeyID from public key */
+		if (cefnetd_generate_keyid_from_pubkey(entry->public_key_data, entry->public_key_len, entry->keyid) != 0) {
+			cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Failed to generate KeyID at line %d\n", line_num);
+			free(entry->private_key_data);
+			free(entry->public_key_data);
+			free(entry->private_key_file);
+			free(entry->public_key_file);
+			free(entry->uri);
+			free(entry);
+			continue;
+		}
+
+		/* Add to linked list */
+		entry->next = hdl->keypair_table_head;
+		hdl->keypair_table_head = entry;
+
+		cef_log_write (CefC_Log_Info, "[cefnetd.keyid] Added URI-KeyPair mapping: %s\n", uri);
+	}
+
+	fclose(fp);
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Loads PEM format key file
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_load_pem_key (
+	const char* key_file, 					/* Key file path							*/
+	unsigned char** key_data, 				/* Output key data							*/
+	int* key_len							/* Output key length						*/
+) {
+	FILE* fp;
+	long file_size;
+	unsigned char* buffer;
+
+	fp = fopen(key_file, "rb");
+	if (fp == NULL) {
+		cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Cannot open key file: %s\n", key_file);
+		return (-1);
+	}
+
+	/* Get file size */
+	fseek(fp, 0, SEEK_END);
+	file_size = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+
+	if (file_size <= 0 || file_size > 64*1024) {
+		cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Invalid key file size: %s\n", key_file);
+		fclose(fp);
+		return (-1);
+	}
+
+	/* Allocate buffer */
+	buffer = (unsigned char*) malloc(file_size);
+	if (buffer == NULL) {
+		cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Memory allocation failed for key file: %s\n", key_file);
+		fclose(fp);
+		return (-1);
+	}
+
+	/* Read file */
+	if (fread(buffer, 1, file_size, fp) != file_size) {
+		cef_log_write (CefC_Log_Error, "[cefnetd.keyid] Failed to read key file: %s\n", key_file);
+		free(buffer);
+		fclose(fp);
+		return (-1);
+	}
+
+	fclose(fp);
+
+	*key_data = buffer;
+	*key_len = (int) file_size;
+
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Generates KeyID from public key using SHA-256
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_generate_keyid_from_pubkey (
+	unsigned char* pubkey_data, 			/* Public key data							*/
+	int pubkey_len,							/* Public key length						*/
+	unsigned char* keyid_out				/* Output KeyID								*/
+) {
+	unsigned char hash[SHA256_DIGEST_LENGTH];
+
+	if (pubkey_data == NULL || keyid_out == NULL || pubkey_len <= 0) {
+		return (-1);
+	}
+
+	/* Generate SHA-256 hash of public key */
+	cef_valid_sha256(pubkey_data, pubkey_len, hash);
+	
+	/* Copy first 32 bytes as KeyID */
+	memcpy(keyid_out, hash, CefC_KeyId_Len);
+
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Selects key pair for URI using longest prefix match
+----------------------------------------------------------------------------------------*/
+static CefT_KeyPair_Entry*					/* Returns key pair entry or NULL			*/
+cefnetd_select_keypair_for_uri (
+	CefT_Netd_Handle* hdl, 					/* cefnetd handle							*/
+	unsigned char* uri, 					/* URI name (TLV format)					*/
+	int uri_len								/* URI length								*/
+) {
+	CefT_KeyPair_Entry* entry;
+	CefT_KeyPair_Entry* best_entry = NULL;
+	int best_match_len = 0;
+
+	if (hdl->keypair_table_head == NULL) {
+		return NULL;
+	}
+
+	/* Search for longest prefix match */
+	entry = hdl->keypair_table_head;
+	while (entry != NULL) {
+		if (entry->uri_len <= uri_len && 
+			memcmp(entry->uri, uri, entry->uri_len) == 0) {
+			if (entry->uri_len > best_match_len) {
+				best_entry = entry;
+				best_match_len = entry->uri_len;
+			}
+		}
+		entry = entry->next;
+	}
+
+	return best_entry;
+}
+
+/*--------------------------------------------------------------------------------------
+	Sets KeyID for Interest based on URI
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_set_keyid_for_interest (
+	CefT_Netd_Handle* hdl,					/* cefnetd handle							*/
+	CefT_CcnMsg_MsgBdy* tlvs,				/* Message body structure					*/
+	unsigned char* uri,						/* URI name (TLV format)					*/
+	int uri_len								/* URI length								*/
+) {
+	CefT_KeyPair_Entry* keypair;
+
+	/* Check if URI has configured keypair */
+	keypair = cefnetd_select_keypair_for_uri(hdl, uri, uri_len);
+	
+	if (keypair != NULL) {
+		/* Set KeyID and validation type */
+		tlvs->alg.valid_type = CefC_T_RSA_SHA256;
+		tlvs->alg.keyid_len = CefC_KeyId_Len;
+		memcpy(tlvs->alg.keyid, keypair->keyid, CefC_KeyId_Len);
+		
+		cef_log_write (CefC_Log_Info, "[cefnetd.keyid] Set KeyID for configured URI\n");
+		return (1); /* KeyID was set */
+	}
+
+	return (0); /* No configuration found, use default behavior */
 }

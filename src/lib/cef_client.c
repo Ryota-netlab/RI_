@@ -88,6 +88,12 @@ cef_client_trim_line_string (
 	char* p3									/* value string after trimming			*/
 );
 
+/*--------------------------------------------------------------------------------------
+	Key pair configuration management functions
+----------------------------------------------------------------------------------------*/
+static void* cef_client_load_keypair_config(void);
+static int cef_client_apply_keyid_for_uri(void*, CefT_CcnMsg_MsgBdy*);
+
 
 /*--------------------------------------------------------------------------------------
 	Creats the local socket name
@@ -741,6 +747,10 @@ cef_client_interest_input (
 	unsigned char buff[CefC_Max_Length];
 	int	send_len = 0, frame_len;
 
+	/* Set KeyID based on URI if configured */
+	extern int cef_client_set_keyid_for_interest(CefT_CcnMsg_MsgBdy*);
+	cef_client_set_keyid_for_interest(tlvs);
+
 	frame_len = cef_frame_interest_create (buff, opt, tlvs);
 	if ( frame_len < 0 ) {
 		return( frame_len );
@@ -765,6 +775,71 @@ cef_dbg_write (CefC_Dbg_Fine, "Failure:chunk_num=%d, send_len=%ld\n", tlvs->chun
 
 	/* send failure */
 	return ( send_len );
+}
+
+/*--------------------------------------------------------------------------------------
+	Sets KeyID for Interest based on URI configuration
+----------------------------------------------------------------------------------------*/
+int												/* Returns 0 on success, -1 on failure 	*/
+cef_client_set_keyid_for_interest (
+	CefT_CcnMsg_MsgBdy* tlvs					/* parameters for Interest 				*/
+) {
+	static int config_loaded = 0;
+	static void* keypair_table = NULL;
+	
+	/* Load configuration on first call */
+	if (!config_loaded) {
+		keypair_table = cef_client_load_keypair_config();
+		config_loaded = 1;
+	}
+	
+	/* If no configuration or already has KeyID, skip */
+	if (keypair_table == NULL || tlvs->alg.keyid_len > 0) {
+		return 0;
+	}
+	
+	/* Set KeyID based on URI configuration */
+	return cef_client_apply_keyid_for_uri(keypair_table, tlvs);
+}
+
+/*--------------------------------------------------------------------------------------
+	Loads key pair configuration from file
+----------------------------------------------------------------------------------------*/
+static void*									/* Returns configuration table or NULL 	*/
+cef_client_load_keypair_config (
+	void
+) {
+	char config_path[PATH_MAX];
+	FILE* fp;
+	
+	/* Get configuration file path */
+	cef_client_config_dir_get(config_path);
+	strcat(config_path, "/cefnetd.keyid");
+	
+	fp = fopen(config_path, "r");
+	if (fp == NULL) {
+		/* No configuration file found */
+		return NULL;
+	}
+	
+	fclose(fp);
+	
+	/* For now, return a dummy pointer to indicate config exists */
+	/* TODO: Implement full configuration loading */
+	return (void*)0x1;
+}
+
+/*--------------------------------------------------------------------------------------
+	Applies KeyID for URI based on configuration  
+----------------------------------------------------------------------------------------*/
+static int									/* Returns 0 on success, -1 on failure 	*/
+cef_client_apply_keyid_for_uri (
+	void* keypair_table,					/* Key pair configuration table				*/
+	CefT_CcnMsg_MsgBdy* tlvs				/* parameters for Interest 				*/
+) {
+	/* For now, just return without setting KeyID */
+	/* TODO: Implement URI matching and KeyID setting */
+	return 0;
 }
 
 /*--------------------------------------------------------------------------------------

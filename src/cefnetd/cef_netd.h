@@ -151,6 +151,22 @@ typedef struct _CefT_UriKeyid_Entry {
 } CefT_UriKeyid_Entry;
 
 /*------------------------------------------------------------------*/
+/* Key Pair Management parameters                                  */
+/*------------------------------------------------------------------*/
+typedef struct _CefT_KeyPair_Entry {
+	unsigned char*		uri;						/* URI string */
+	int					uri_len;
+	char*				private_key_file;			/* Private key file path */
+	char*				public_key_file;			/* Public key file path */
+	unsigned char*		private_key_data;			/* Loaded private key data */
+	unsigned char*		public_key_data;			/* Loaded public key data */
+	int					private_key_len;
+	int					public_key_len;
+	unsigned char		keyid[CefC_KeyId_Len];		/* Generated KeyID */
+	struct _CefT_KeyPair_Entry* next;				/* Linked list */
+} CefT_KeyPair_Entry;
+
+/*------------------------------------------------------------------*/
 /****************************************************************************************
  Structure Declarations
  ****************************************************************************************/
@@ -354,6 +370,9 @@ typedef struct {
 
 	uint	 			tx_que_size;
 	CefT_Mp_Handle 		tx_que_mp;
+
+	/*** Key Pair Management ***/
+	CefT_KeyPair_Entry*	keypair_table_head;		/* Key pair table */
 
 } CefT_Netd_Handle;
 
