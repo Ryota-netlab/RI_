@@ -3,11 +3,11 @@
 echo "Building cefore_custom"
 cefnetdstop
 
-make clean
+# make clean
 autoreconf
 autoconf
 automake
-./configure
+./configure --enable-cache --enable-csmgr
 make 
 sudo make install
 sudo ldconfig
@@ -15,3 +15,4 @@ sudo ldconfig
 echo "Finished building cefore_custom"
 
 cefnetdstart
+cefstatus

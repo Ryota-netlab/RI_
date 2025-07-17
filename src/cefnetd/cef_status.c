@@ -96,6 +96,19 @@ static char prot_str[3][16] = {"invalid", "tcp", "udp"};
 */
 
 /*--------------------------------------------------------------------------------------
+	Function prototypes for -i option
+----------------------------------------------------------------------------------------*/
+static int cef_status_interest_details_output (CefT_Netd_Handle* hdl);
+static int cef_status_fib_interest_output (CefT_Hash_Handle* fib);
+static int cef_status_pit_interest_output (CefT_Hash_Handle* pit, const char* pit_name);
+
+/*--------------------------------------------------------------------------------------
+	Function prototypes for -c option  
+----------------------------------------------------------------------------------------*/
+static int cef_status_content_details_output (CefT_Netd_Handle* hdl);
+static int cef_status_cs_content_output (CefT_Cs_Stat* cs_stat);
+
+/*--------------------------------------------------------------------------------------
 	Output Face status
 ----------------------------------------------------------------------------------------*/
 static int
@@ -258,6 +271,20 @@ cef_status_stats_output (
 		goto endfunc;
 	}
 #endif	// CefC_INTEREST_RETURN
+
+	/* output Interest details when -i option is specified */
+	if (output_opt_f & CefC_Ctrl_StatusOpt_Interest) {
+		if ((fret=cef_status_interest_details_output (hdl)) != 0){
+			goto endfunc;
+		}
+	}
+
+	/* output Content details when -c option is specified */
+	if (output_opt_f & CefC_Ctrl_StatusOpt_Content) {
+		if ((fret=cef_status_content_details_output (hdl)) != 0){
+			goto endfunc;
+		}
+	}
 
 	/* output Face	*/
 	sprintf (work_str, "Faces :");
@@ -1286,3 +1313,409 @@ cef_status_localcache_output (
 	return (0);
 }
 #endif //((defined CefC_CefnetdCache) && (defined CefC_Develop))
+
+/*--------------------------------------------------------------------------------------
+	Output Interest details
+----------------------------------------------------------------------------------------*/
+static int										/* Returns a negative value if it fails 	*/
+cef_status_interest_details_output (
+	CefT_Netd_Handle* hdl						/* cefnetd handle						*/
+) {
+	char work_str[CefC_Max_Length];
+	int fret = 0;
+	
+	/* output Interest detailed statistics */
+	sprintf (work_str, "\n--- Interest Details ---\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	/* Global Interest statistics breakdown */
+	sprintf (work_str, 
+		"Global Statistics:\n"
+		"  Total Rx Interest : %llu\n"
+		"    Regular         : %llu\n"
+		"    Symbolic        : %llu\n"
+		"    Selective       : %llu\n"
+		"  Total Tx Interest : %llu\n"
+		"    Regular         : %llu\n"
+		"    Symbolic        : %llu\n"
+		"    Selective       : %llu\n\n",
+		(unsigned long long)hdl->stat_recv_interest,
+		(unsigned long long)hdl->stat_recv_interest_types[0],
+		(unsigned long long)hdl->stat_recv_interest_types[1],
+		(unsigned long long)hdl->stat_recv_interest_types[2],
+		(unsigned long long)hdl->stat_send_interest,
+		(unsigned long long)hdl->stat_send_interest_types[0],
+		(unsigned long long)hdl->stat_send_interest_types[1],
+		(unsigned long long)hdl->stat_send_interest_types[2]);
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	/* PIT entry counts */
+	sprintf (work_str, 
+		"PIT Entry Counts:\n"
+		"  App PIT entries   : %d\n"
+		"  Main PIT entries  : %d\n\n",
+		cef_hash_tbl_item_num_get (hdl->app_pit),
+		cef_hash_tbl_item_num_get (hdl->pit));
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	/* PIT Interest URIs */
+	sprintf (work_str, "Interest URIs (from PIT entries):\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "App PIT:\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	if ((fret=cef_status_pit_interest_output (&hdl->app_pit, "App PIT")) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "Main PIT:\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	if ((fret=cef_status_pit_interest_output (&hdl->pit, "Main PIT")) != 0){
+		return (-1);
+	}
+	
+	/* FIB Interest statistics */
+	sprintf (work_str, "FIB Interest Statistics:\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	if ((fret=cef_status_fib_interest_output (&hdl->fib)) != 0){
+		return (-1);
+	}
+	
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Output FIB Interest statistics
+----------------------------------------------------------------------------------------*/
+static int										/* Returns a negative value if it fails 	*/
+cef_status_fib_interest_output (
+	CefT_Hash_Handle* fib						/* FIB									*/
+) {
+	CefT_Fib_Entry* entry;
+	uint32_t index = 0;
+	char uri[CefC_NAME_BUFSIZ] = {0};
+	char work_str[CefC_Max_Length];
+	int fret = 0;
+	int res = 0;
+	int table_num = 0;
+	int i = 0;
+	
+	/* Check if FIB has entries */
+	table_num = cef_hash_tbl_item_num_get (*fib);
+	if (table_num == 0) {
+		sprintf (work_str, "  No FIB entries\n\n");
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+		return (0);
+	}
+	
+	/* Iterate through FIB entries */
+	for (i = 0; i < table_num; i++) {
+		entry = (CefT_Fib_Entry*) cef_hash_tbl_elem_get (*fib, &index);
+		if (entry == NULL) {
+			break;
+		}
+		
+		/* Convert name to URI */
+		res = cef_frame_conversion_name_to_uri (entry->key, entry->klen, uri);
+		if (res < 0) {
+			index++;
+			continue;
+		}
+		
+		/* Show Interest statistics for this FIB entry */
+		sprintf (work_str, 
+			"  %s\n"
+			"    Rx Interest : %llu (RGL:%llu, SYM:%llu, SEL:%llu)\n",
+			uri,
+			(unsigned long long)entry->rx_int,
+			(unsigned long long)entry->rx_int_types[0],
+			(unsigned long long)entry->rx_int_types[1],
+			(unsigned long long)entry->rx_int_types[2]);
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+		
+		index++;
+	}
+	
+	sprintf (work_str, "\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Output PIT Interest URIs
+----------------------------------------------------------------------------------------*/
+static int										/* Returns a negative value if it fails 	*/
+cef_status_pit_interest_output (
+	CefT_Hash_Handle* pit,						/* PIT									*/
+	const char* pit_name						/* PIT name for display					*/
+) {
+	char uri[CefC_NAME_BUFSIZ] = {0};
+	char work_str[CefC_Max_Length];
+	int fret = 0;
+	int res = 0;
+	int table_num = 0;
+	int i = 0;
+	uint32_t index = 0;
+	uint32_t elem_num = 0;
+	uint32_t elem_index = 0;
+	
+	/* Check if PIT has entries */
+	table_num = cef_lhash_tbl_item_num_get (*pit);
+	if (table_num == 0) {
+		sprintf (work_str, "  No PIT entries\n\n");
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+		return (0);
+	}
+	
+	/* Iterate through PIT entries */
+	for (i = 0; i < table_num; i++) {
+		elem_num = 0;
+		if (!cef_lhash_tbl_elem_get (*pit, &index, &elem_num)) {
+			index++;
+			continue;
+		}
+		
+		for (elem_index = 0; elem_index < elem_num; elem_index++) {
+			CefT_Pit_Entry* entry;
+			entry = (CefT_Pit_Entry*) cef_lhash_tbl_item_get_from_index (*pit, index, elem_index);
+			
+			if (!entry)
+				continue;
+				
+			/* Parse Name and extract chunk number */
+			uint16_t name_index = 0;
+			uint16_t chunknum_f = 0;
+			uint32_t chunk_num = 0;
+			uint16_t dec_name_len = 0;
+			struct tlv_hdr* thdr;
+			uint16_t sub_type;
+			uint16_t sub_length;
+			
+			while (name_index < entry->klen) {
+				thdr = (struct tlv_hdr*)(&entry->key[name_index]);
+				sub_type = ntohs (thdr->type);
+				sub_length = ntohs (thdr->length);
+				name_index += CefC_S_TLF;
+				
+				switch (sub_type) {
+					case CefC_T_NAMESEGMENT: {
+						dec_name_len += CefC_S_TLF + sub_length;
+						break;
+					}
+					case CefC_T_CHUNK: {
+						chunknum_f = 1;
+						chunk_num = 0;
+						for (int j = 0; j < sub_length; j++) {
+							chunk_num = (chunk_num << 8) | entry->key[name_index+j];
+						}
+						break;
+					}
+					default: {
+						dec_name_len += CefC_S_TLF + sub_length;
+						break;
+					}
+				}
+				name_index += sub_length;
+			}
+			
+			/* Convert name to URI */
+			res = cef_frame_conversion_name_to_uri (entry->key, dec_name_len, uri);
+			if (res < 0) {
+				continue;
+			}
+			
+			/* Display URI with chunk number if present */
+			if (chunknum_f) {
+				sprintf (work_str, "  %s/Chunk=%u\n", uri, chunk_num);
+			} else {
+				sprintf (work_str, "  %s\n", uri);
+			}
+			if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+				return (-1);
+			}
+			
+			memset (uri, 0, sizeof(uri));
+		}
+		index++;
+	}
+	
+	sprintf (work_str, "\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Output Content details
+----------------------------------------------------------------------------------------*/
+static int							/* Returns a negative value if it fails 	*/
+cef_status_content_details_output (
+	CefT_Netd_Handle* hdl						/* cefnetd handle							*/
+) {
+	char work_str[CefC_Max_Length];
+	int fret = 0;
+	
+	/* output Content detailed statistics */
+	sprintf (work_str, "\n--- Content Details ---\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	/* Content Store Information */
+	if (hdl->cs_stat == NULL) {
+		sprintf (work_str, "Content Store: Disabled\n\n");
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+		return (0);
+	}
+	
+	/* Content Store Mode */
+	sprintf (work_str, "Content Store Information:\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "  Mode: ");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	switch (hdl->cs_stat->cache_type) {
+		case 0:
+			sprintf (work_str, "None\n");
+			break;
+		case 1:
+			sprintf (work_str, "Local Cache\n");
+			break;
+		case 2:
+			sprintf (work_str, "External Cache (csmgrd)\n");
+			break;
+		case 3:
+			sprintf (work_str, "External Cache (conpubd)\n");
+			break;
+		default:
+			sprintf (work_str, "Unknown (%d)\n", hdl->cs_stat->cache_type);
+			break;
+	}
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "  Default RCT: %u seconds\n", hdl->cs_stat->def_rct);
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "  Access Mode: %s\n", 
+		(hdl->cs_stat->csmgr_access == 0) ? "Read/Write" : "Read Only");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "  Buffer Cache Time: %u ms\n", hdl->cs_stat->buffer_cache_time);
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	/* Local cache specific information */
+	if (hdl->cs_stat->cache_type == 1) {
+		sprintf (work_str, "  Local Cache Capacity: %u\n", hdl->cs_stat->local_cache_capacity);
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+		
+		sprintf (work_str, "  Local Cache Interval: %u seconds\n", hdl->cs_stat->local_cache_interval);
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+	}
+	
+	/* Cached Content Information */
+	if ((fret=cef_status_cs_content_output (hdl->cs_stat)) != 0){
+		return (-1);
+	}
+	
+	return (0);
+}
+
+/*--------------------------------------------------------------------------------------
+	Output Content Store cached content
+----------------------------------------------------------------------------------------*/
+static int							/* Returns a negative value if it fails 	*/
+cef_status_cs_content_output (
+	CefT_Cs_Stat* cs_stat						/* Content Store status					*/
+) {
+	char work_str[CefC_Max_Length];
+	int fret = 0;
+	int table_num = 0;
+	uint32_t index = 0;
+	void* entry = NULL;
+	
+	sprintf (work_str, "\nCached Content Information:\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	/* Check if Content Store is available and has content table */
+	if (!cs_stat->cob_table) {
+		sprintf (work_str, "  No content table available\n\n");
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+		return (0);
+	}
+	
+	/* Check number of cached contents */
+	table_num = cef_hash_tbl_item_num_get (cs_stat->cob_table);
+	if (table_num == 0) {
+		sprintf (work_str, "  No cached content\n\n");
+		if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+			return (-1);
+		}
+		return (0);
+	}
+	
+	sprintf (work_str, "  Total cached objects: %d\n", table_num);
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "  Content entries are managed by Content Store.\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	sprintf (work_str, "  Use external tools for detailed content listing.\n\n");
+	if ((fret=cef_status_add_output_to_rsp_buf(work_str)) != 0){
+		return (-1);
+	}
+	
+	return (0);
+}

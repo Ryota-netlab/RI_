@@ -125,6 +125,8 @@
 #define CefC_Ctrl_StatusOpt_LCache	0x0004
 #endif //((defined CefC_CefnetdCache) && (defined CefC_Develop))
 #define CefC_Ctrl_StatusOpt_Numofpit	0x0008
+#define CefC_Ctrl_StatusOpt_Interest	0x0010
+#define CefC_Ctrl_StatusOpt_Content	0x0020
 
 /* cefstatus output option */
 #if ((defined CefC_Develop))

@@ -184,6 +184,20 @@ int main (
 				printerr("[-n] has no parameter.\n");
 				exit (1);
 			}
+		} else if (strcmp (work_arg, "-i") == 0) {			//Interest details
+			if (strcmp (argv[1], CefC_Arg_Status) == 0) {
+				output_opt_f |= CefC_Ctrl_StatusOpt_Interest;
+			} else {
+				printerr("[-i] has no parameter.\n");
+				exit (1);
+			}
+		} else if (strcmp (work_arg, "-c") == 0) {			//Content details
+			if (strcmp (argv[1], CefC_Arg_Status) == 0) {
+				output_opt_f |= CefC_Ctrl_StatusOpt_Content;
+			} else {
+				printerr("[-c] has no parameter.\n");
+				exit (1);
+			}
 #if ((defined CefC_CefnetdCache) && (defined CefC_Develop))
 		} else if (strcmp (work_arg, "-lc") == 0) {			//Secret option
 			if (strcmp (argv[1], CefC_Arg_Status) == 0) {

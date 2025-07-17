@@ -397,6 +397,21 @@ cefnetd_cefcache_object_process (
 );
 #endif //CefC_IsEnable_ContentStore
 
+#if CefC_IsEnable_ContentStore
+/*--------------------------------------------------------------------------------------
+	Process cached Content Object
+----------------------------------------------------------------------------------------*/
+static int									/* Returns a negative value if it fails 	*/
+cefnetd_cefcache_object_process (
+	CefT_Netd_Handle* hdl,					/* cefnetd handle							*/
+	unsigned char* msg 						/* received message to handle				*/
+) {
+	/* For now, this function just returns success */
+	/* TODO: Implement proper cached object processing if needed */
+	return (0);
+}
+#endif //CefC_IsEnable_ContentStore
+
 static int									/* Returns a negative value if it fails 	*/
 (*cefnetd_incoming_msg_process[CefC_Msg_Process_Num]) (
 	CefT_Netd_Handle* hdl,					/* cefnetd handle							*/
